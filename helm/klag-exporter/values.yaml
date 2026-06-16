@@ -197,6 +197,21 @@ config:
       # ssl.certificate.location: "/path/to/client.pem"
       # ssl.key.location: "/path/to/client.key"
 
+  # Example: Amazon MSK with IAM authentication (OAUTHBEARER/SigV4).
+  # MSK IAM brokers listen on port 9098; security.protocol and sasl.mechanism
+  # are injected automatically when aws_msk_iam is set.
+  #
+  # - name: "msk-production"
+  #   bootstrap_servers: "b-1.msk.us-east-1.amazonaws.com:9098,b-2.msk.us-east-1.amazonaws.com:9098"
+  #   group_whitelist: [".*"]
+  #   group_blacklist: []
+  #   topic_whitelist: [".*"]
+  #   topic_blacklist: ["^__.*"]
+  #   aws_msk_iam:
+  #     region: "us-east-1"   # or omit to rely on AWS_REGION / AWS_DEFAULT_REGION
+  #   labels:
+  #     environment: "production"
+
 customSecretVolumes: {}
   # CASE 1: Mount whole secret into a directory
   # Result: /etc/secrets/all/username and /etc/secrets/all/password created automatically

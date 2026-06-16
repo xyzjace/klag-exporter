@@ -210,6 +210,16 @@ pub enum LeadershipProvider {
     Kubernetes,
 }
 
+/// Configuration for AWS MSK IAM (SASL/OAUTHBEARER) authentication.
+/// Presence of this block (even with no fields set) enables MSK IAM auth
+/// for the cluster.
+#[derive(Debug, Deserialize, Clone)]
+pub struct MskIamConfig {
+    /// AWS region for token signing. When omitted, klag-exporter uses the normal AWS credential chain.
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ClusterConfig {
     pub name: String,
@@ -226,6 +236,9 @@ pub struct ClusterConfig {
     pub consumer_properties: HashMap<String, String>,
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// When set, enables AWS MSK IAM authentication for this cluster.
+    #[serde(default)]
+    pub aws_msk_iam: Option<MskIamConfig>,
 }
 
 fn default_poll_interval() -> Duration {
@@ -1116,5 +1129,104 @@ bootstrap_servers = "localhost:9092"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("max_concurrent_watermarks must be at least 1"));
+    }
+
+    #[test]
+    fn test_msk_iam_block_parses_with_region() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "msk-test"
+bootstrap_servers = "b-1.msk.us-east-1.amazonaws.com:9098"
+
+[clusters.aws_msk_iam]
+region = "us-east-1"
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        let iam = config.clusters[0]
+            .aws_msk_iam
+            .as_ref()
+            .expect("aws_msk_iam should be Some");
+        assert_eq!(iam.region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn test_msk_iam_block_parses_without_region() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "msk-test"
+bootstrap_servers = "b-1.msk.us-east-1.amazonaws.com:9098"
+
+[clusters.aws_msk_iam]
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        let iam = config.clusters[0]
+            .aws_msk_iam
+            .as_ref()
+            .expect("aws_msk_iam should be Some");
+        assert!(iam.region.is_none(), "region should be None when omitted");
+    }
+
+    #[test]
+    fn test_no_msk_iam_block_leaves_field_none() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "plain-kafka"
+bootstrap_servers = "kafka:9092"
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        assert!(
+            config.clusters[0].aws_msk_iam.is_none(),
+            "aws_msk_iam should be None when block is absent"
+        );
+    }
+
+    #[test]
+    fn test_msk_iam_region_env_substitution() {
+        std::env::set_var("TEST_MSK_REGION", "ap-southeast-2");
+
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "msk-test"
+bootstrap_servers = "b-1.msk.ap-southeast-2.amazonaws.com:9098"
+
+[clusters.aws_msk_iam]
+region = "${TEST_MSK_REGION}"
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.clusters[0]
+                .aws_msk_iam
+                .as_ref()
+                .unwrap()
+                .region
+                .as_deref(),
+            Some("ap-southeast-2")
+        );
+
+        std::env::remove_var("TEST_MSK_REGION");
     }
 }

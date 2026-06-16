@@ -24,7 +24,7 @@ A high-performance Apache Kafka® consumer group lag exporter written in Rust. C
 - **Flexible Filtering** — Regex-based whitelist/blacklist for consumer groups and topics
 - **Configurable Granularity** — Topic-level (reduced cardinality) or partition-level metrics
 - **Custom Labels** — Add environment, datacenter, or any custom labels to all metrics
-- **Full Authentication Support** — SASL/PLAIN, SASL/SCRAM, SSL/TLS, and Kerberos via librdkafka
+- **Full Authentication Support** — SASL/PLAIN, SASL/SCRAM, SSL/TLS, Kerberos, and AWS MSK IAM (OAUTHBEARER/SigV4)
 - **Production Ready** — Health (`/health`) and readiness (`/ready`) endpoints for Kubernetes deployments
 - **High Availability** — Optional Kubernetes leader election for active-passive failover (see [HA Guide](docs/high-availability.md))
 - **Resource Efficient** — Written in Rust with async/await, minimal memory footprint, and bounded concurrency
@@ -289,6 +289,10 @@ datacenter = "us-east-1"
 ### Environment Variable Substitution
 
 Use `${VAR_NAME}` syntax in config values. The exporter will substitute with environment variable values at startup.
+
+#### Known limitation
+
+`ENABLE_REFRESH_OAUTH_TOKEN` is a compile-time constant in the librdkafka Rust bindings. klag-exporter therefore takes over *any* `OAUTHBEARER` mechanism on all client types. If you configure `sasl.mechanism = OAUTHBEARER` via `consumer_properties` *without* an `[clusters.aws_msk_iam]` block (e.g. for a generic OIDC provider), the token-refresh callback will return an error instead of using librdkafka's built-in OIDC flow. SASL/PLAIN, SCRAM, SSL, and Kerberos are completely unaffected.
 
 ## Metrics
 

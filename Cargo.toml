@@ -16,6 +16,8 @@ exclude = ["test-stack/", "docs/", ".github/", ".claude/"]
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl", "zstd", "libz", "external-lz4"] }
+aws-msk-iam-sasl-signer = "1"
+aws-config = "1"
 
 axum = "0.7"
 prometheus = "0.14"

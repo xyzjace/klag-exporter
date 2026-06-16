@@ -134,3 +134,32 @@ environment = "production"
 #
 # [clusters.labels]
 # environment = "staging"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Example: Amazon MSK with IAM authentication (SASL/OAUTHBEARER + SigV4)
+#
+# MSK IAM brokers listen on port 9098. Credentials are loaded automatically
+# from the standard AWS chain: env vars → EKS IRSA web-identity token →
+# EC2 instance profile. No static secrets required.
+#
+# The [clusters.aws_msk_iam] block activates IAM auth for this cluster.
+# security.protocol and sasl.mechanism are set automatically; do not set them
+# in consumer_properties unless you need to override a default.
+#
+# region is optional: if omitted, klag-exporter falls back to the AWS_REGION
+# or AWS_DEFAULT_REGION environment variables. Fail-fast at startup if none
+# of those are available.
+# ──────────────────────────────────────────────────────────────────────────────
+# [[clusters]]
+# name = "msk-production"
+# bootstrap_servers = "b-1.msk.us-east-1.amazonaws.com:9098,b-2.msk.us-east-1.amazonaws.com:9098"
+# group_whitelist = [".*"]
+# group_blacklist = []
+# topic_whitelist = [".*"]
+# topic_blacklist = ["^__.*"]
+#
+# [clusters.aws_msk_iam]
+# region = "us-east-1"        # or omit and rely on AWS_REGION / AWS_DEFAULT_REGION
+#
+# [clusters.labels]
+# environment = "production"
