@@ -1,17 +1,20 @@
-use aws_config::Region;
 use rdkafka::client::{ClientContext, OAuthToken};
+use rdkafka::config::ClientConfig;
 use rdkafka::consumer::ConsumerContext;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tracing::debug;
 
+use crate::config::ClusterConfig;
+use crate::error::KlagError;
+
 // ---------------------------------------------------------------------------
 // Token provider abstraction
 // ---------------------------------------------------------------------------
 
 /// Generates an OAuth token on demand. Cloud-specific implementations (e.g.
-/// MSK IAM, GCP, Azure) live in their own structs
+/// MSK IAM, GCP, Azure) live in their own structs.
 pub trait OAuthTokenProvider: Send + Sync {
     fn generate(&self) -> Result<OAuthToken, Box<dyn std::error::Error>>;
 }
@@ -20,7 +23,11 @@ pub trait OAuthTokenProvider: Send + Sync {
 // AWS MSK IAM implementation
 // ---------------------------------------------------------------------------
 
-/// Generates SigV4-presigned OAUTHBEARER tokens for Amazon MSK IAM
+#[cfg(feature = "msk-iam")]
+use aws_types::region::Region;
+
+/// Generates SigV4-presigned OAUTHBEARER tokens for Amazon MSK IAM.
+#[cfg(feature = "msk-iam")]
 pub struct MskIamTokenProvider {
     region: String,
     /// Tokio handle captured at construction. Used to drive the async signer
@@ -28,6 +35,7 @@ pub struct MskIamTokenProvider {
     rt: Handle,
 }
 
+#[cfg(feature = "msk-iam")]
 impl MskIamTokenProvider {
     /// Construct the provider, resolving the region if not explicitly supplied.
     ///
@@ -51,6 +59,7 @@ impl MskIamTokenProvider {
     }
 }
 
+#[cfg(feature = "msk-iam")]
 impl OAuthTokenProvider for MskIamTokenProvider {
     fn generate(&self) -> Result<OAuthToken, Box<dyn std::error::Error>> {
         debug!(region = %self.region, "Generating MSK IAM OAuth token");
@@ -84,6 +93,46 @@ impl OAuthTokenProvider for MskIamTokenProvider {
             principal_name: String::new(),
             lifetime_ms: expiry_ms,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared auth wiring
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "msk-iam"))]
+const MSK_IAM_DISABLED_MSG: &str = "cluster has [clusters.aws_msk_iam] configured but this \
+    binary was built without the `msk-iam` feature; rebuild with default features enabled \
+    (cargo build --release) or pass --features msk-iam";
+
+/// Build the shared OAuth token provider for a cluster, if MSK IAM is configured.
+/// Call once per cluster and reuse the returned `Arc` for all librdkafka clients.
+pub fn build_token_provider(
+    config: &ClusterConfig,
+) -> crate::error::Result<Option<Arc<dyn OAuthTokenProvider>>> {
+    let Some(iam) = &config.aws_msk_iam else {
+        return Ok(None);
+    };
+
+    #[cfg(feature = "msk-iam")]
+    {
+        let provider = MskIamTokenProvider::new(iam.region.clone(), Handle::current())
+            .map_err(KlagError::Config)?;
+        Ok(Some(Arc::new(provider)))
+    }
+
+    #[cfg(not(feature = "msk-iam"))]
+    {
+        let _ = iam;
+        Err(KlagError::Config(MSK_IAM_DISABLED_MSG.to_string()))
+    }
+}
+
+/// Inject MSK IAM SASL defaults before `consumer_properties` so explicit overrides win.
+pub fn apply_msk_iam_sasl(config: &ClusterConfig, client_config: &mut ClientConfig) {
+    if config.aws_msk_iam.is_some() {
+        client_config.set("security.protocol", "SASL_SSL");
+        client_config.set("sasl.mechanism", "OAUTHBEARER");
     }
 }
 
@@ -137,3 +186,77 @@ impl ClientContext for KlagContext {
 /// Required so that `BaseConsumer<KlagContext>` compiles. All methods use
 /// the default no-op implementations.
 impl ConsumerContext for KlagContext {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn test_handle() -> Handle {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .handle()
+            .clone()
+    }
+
+    #[test]
+    #[cfg(feature = "msk-iam")]
+    fn msk_iam_provider_uses_explicit_region() {
+        assert!(MskIamTokenProvider::new(Some("us-east-1".to_string()), test_handle()).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "msk-iam")]
+    fn msk_iam_provider_falls_back_to_aws_region() {
+        let _guard = EnvVarGuard::set("AWS_REGION", "eu-west-1");
+        assert!(MskIamTokenProvider::new(None, test_handle()).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "msk-iam")]
+    fn msk_iam_provider_falls_back_to_aws_default_region() {
+        let _aws_region = EnvVarGuard::unset("AWS_REGION");
+        let _guard = EnvVarGuard::set("AWS_DEFAULT_REGION", "ap-southeast-2");
+        assert!(MskIamTokenProvider::new(None, test_handle()).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "msk-iam")]
+    fn msk_iam_provider_errors_when_no_region_available() {
+        let _aws_region = EnvVarGuard::unset("AWS_REGION");
+        let _aws_default = EnvVarGuard::unset("AWS_DEFAULT_REGION");
+        match MskIamTokenProvider::new(None, test_handle()) {
+            Err(e) => assert!(e.contains("MSK IAM auth requires an AWS region")),
+            Ok(_) => panic!("missing region should fail"),
+        }
+    }
+}

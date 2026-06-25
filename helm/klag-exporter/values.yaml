@@ -16,6 +16,9 @@ serviceAccount:
   # Automatically mount a ServiceAccount's API credentials?
   automount: true
   # Annotations to add to the service account.
+  # For MSK IAM on EKS (IRSA), grant the role kafka-cluster:Connect (and related
+  # actions) on the MSK cluster, then set:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/klag-exporter-msk-role
   annotations: {}
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template.

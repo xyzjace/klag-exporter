@@ -1,6 +1,6 @@
 use crate::config::ClusterConfig;
 use crate::error::{KlagError, Result};
-use crate::kafka::auth::{KlagContext, MskIamTokenProvider, OAuthTokenProvider};
+use crate::kafka::auth::{apply_msk_iam_sasl, KlagContext};
 use crate::kafka::client::{KlagConsumer, TopicPartition};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::Consumer;
@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tracing::{debug, instrument, warn};
 
 /// Result of fetching a timestamp from Kafka
@@ -29,10 +28,15 @@ pub struct TimestampConsumer {
     consumer_counter: AtomicU64,
     pool: Mutex<Vec<KlagConsumer>>,
     pool_size: usize,
+    token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
 }
 
 impl TimestampConsumer {
-    pub fn with_pool_size(config: &ClusterConfig, pool_size: usize) -> Result<Self> {
+    pub fn with_pool_size(
+        config: &ClusterConfig,
+        pool_size: usize,
+        token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
+    ) -> Result<Self> {
         let mut consumer = Self {
             config: config.clone(),
             cluster_name: config.name.clone(),
@@ -40,6 +44,7 @@ impl TimestampConsumer {
             consumer_counter: AtomicU64::new(0),
             pool: Mutex::new(Vec::with_capacity(pool_size)),
             pool_size,
+            token_provider,
         };
 
         // Pre-populate the pool
@@ -82,24 +87,14 @@ impl TimestampConsumer {
             .set("queued.max.messages.kbytes", "1024")
             .set("topic.metadata.refresh.interval.ms", "-1");
 
-        // Inject SASL defaults before user properties so explicit overrides win.
-        let token_provider: Option<Arc<dyn OAuthTokenProvider>> =
-            if let Some(iam) = &self.config.aws_msk_iam {
-                client_config.set("security.protocol", "SASL_SSL");
-                client_config.set("sasl.mechanism", "OAUTHBEARER");
-                let provider = MskIamTokenProvider::new(iam.region.clone(), Handle::current())
-                    .map_err(KlagError::Config)?;
-                Some(Arc::new(provider))
-            } else {
-                None
-            };
+        apply_msk_iam_sasl(&self.config, &mut client_config);
 
         for (key, value) in &self.config.consumer_properties {
             client_config.set(key, value);
         }
 
         client_config
-            .create_with_context(KlagContext::new(token_provider))
+            .create_with_context(KlagContext::new(self.token_provider.clone()))
             .map_err(KlagError::Kafka)
     }
 

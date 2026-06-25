@@ -79,6 +79,13 @@ data:
     group_blacklist = [{{- range $i, $v := .group_blacklist }}{{- if $i }}, {{ end }}{{ $v | quote }}{{- end }}]
     topic_whitelist = [{{- range $i, $v := .topic_whitelist }}{{- if $i }}, {{ end }}{{ $v | quote }}{{- end }}]
     topic_blacklist = [{{- range $i, $v := .topic_blacklist }}{{- if $i }}, {{ end }}{{ $v | quote }}{{- end }}]
+    {{- if .aws_msk_iam }}
+
+    [clusters.aws_msk_iam]
+    {{- if .aws_msk_iam.region }}
+    region = {{ .aws_msk_iam.region | quote }}
+    {{- end }}
+    {{- end }}
     {{- if index . "clusters.consumer_properties" }}
 
     [clusters.consumer_properties]

@@ -1,6 +1,6 @@
 use crate::config::{ClusterConfig, PerformanceConfig};
 use crate::error::{KlagError, Result};
-use crate::kafka::auth::{KlagContext, MskIamTokenProvider, OAuthTokenProvider};
+use crate::kafka::auth::{apply_msk_iam_sasl, build_token_provider, KlagContext};
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -9,7 +9,6 @@ use rdkafka::metadata::Metadata;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tracing::{debug, info, instrument, warn};
 
 pub type KlagAdmin = AdminClient<KlagContext>;
@@ -70,6 +69,7 @@ pub struct KafkaClient {
     admin: Mutex<Arc<KlagAdmin>>,
     consumer: Mutex<Arc<KlagConsumer>>,
     config: ClusterConfig,
+    token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
     timeout: Duration,
     performance: PerformanceConfig,
 }
@@ -79,42 +79,41 @@ impl KafkaClient {
     /// Prefer `with_performance` for large clusters.
     #[allow(dead_code)]
     pub fn new(config: &ClusterConfig) -> Result<Self> {
-        Self::with_performance(config, PerformanceConfig::default())
+        Self::with_performance(config, PerformanceConfig::default(), None)
     }
 
     pub fn with_performance(
         config: &ClusterConfig,
         performance: PerformanceConfig,
+        token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
     ) -> Result<Self> {
         let timeout = performance.kafka_timeout;
-        let (admin, consumer) = Self::create_clients(config)?;
+        let token_provider = match token_provider {
+            Some(provider) => Some(provider),
+            None => build_token_provider(config)?,
+        };
+        let (admin, consumer) = Self::create_clients(config, token_provider.clone())?;
 
         Ok(Self {
             admin: Mutex::new(Arc::new(admin)),
             consumer: Mutex::new(Arc::new(consumer)),
             config: config.clone(),
+            token_provider,
             timeout,
             performance,
         })
     }
 
     /// Create fresh AdminClient + BaseConsumer pair.
-    fn create_clients(config: &ClusterConfig) -> Result<(KlagAdmin, KlagConsumer)> {
+    fn create_clients(
+        config: &ClusterConfig,
+        token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
+    ) -> Result<(KlagAdmin, KlagConsumer)> {
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", &config.bootstrap_servers);
         client_config.set("client.id", format!("klag-exporter-{}", config.name));
 
-        // Inject SASL defaults before user properties so explicit overrides win.
-        let token_provider: Option<Arc<dyn OAuthTokenProvider>> =
-            if let Some(iam) = &config.aws_msk_iam {
-                client_config.set("security.protocol", "SASL_SSL");
-                client_config.set("sasl.mechanism", "OAUTHBEARER");
-                let provider = MskIamTokenProvider::new(iam.region.clone(), Handle::current())
-                    .map_err(KlagError::Config)?;
-                Some(Arc::new(provider))
-            } else {
-                None
-            };
+        apply_msk_iam_sasl(config, &mut client_config);
 
         for (key, value) in &config.consumer_properties {
             client_config.set(key, value);
@@ -167,7 +166,8 @@ impl KafkaClient {
     /// memory growth on clusters with many topics.
     pub fn recycle(&self) -> Result<()> {
         let rss_before = get_rss_kb();
-        let (new_admin, new_consumer) = Self::create_clients(&self.config)?;
+        let (new_admin, new_consumer) =
+            Self::create_clients(&self.config, self.token_provider.clone())?;
 
         *self.admin.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(new_admin);
         *self.consumer.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(new_consumer);

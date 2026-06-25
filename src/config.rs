@@ -215,7 +215,7 @@ pub enum LeadershipProvider {
 /// for the cluster.
 #[derive(Debug, Deserialize, Clone)]
 pub struct MskIamConfig {
-    /// AWS region for token signing. When omitted, klag-exporter uses the normal AWS credential chain.
+    /// AWS region for token signing, defaults to AWS_REGION or AWS_DEFAULT_REGION environment variables
     #[serde(default)]
     pub region: Option<String>,
 }

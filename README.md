@@ -400,6 +400,9 @@ cargo build --release
 # Release build with High Availability support
 cargo build --release --features kubernetes
 
+# Lean release build without AWS MSK IAM support (~smaller binary)
+cargo build --release --no-default-features --features jemalloc
+
 # Run tests
 cargo test
 
