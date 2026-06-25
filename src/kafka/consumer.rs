@@ -1,11 +1,13 @@
 use crate::config::ClusterConfig;
 use crate::error::{KlagError, Result};
-use crate::kafka::client::TopicPartition;
+use crate::kafka::auth::{apply_msk_iam_sasl, KlagContext};
+use crate::kafka::client::{KlagConsumer, TopicPartition};
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::Consumer;
 use rdkafka::message::Message;
 use rdkafka::Offset;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
@@ -17,19 +19,24 @@ pub struct TimestampFetchResult {
     pub timestamp_ms: i64,
 }
 
-/// Pool-based timestamp consumer. Maintains a pool of reusable BaseConsumers
+/// Pool-based timestamp consumer. Maintains a pool of reusable consumers
 /// to avoid connection churn (TCP/TLS/SASL handshake per fetch).
 pub struct TimestampConsumer {
     config: ClusterConfig,
     cluster_name: String,
     fetch_timeout: Duration,
     consumer_counter: AtomicU64,
-    pool: Mutex<Vec<BaseConsumer>>,
+    pool: Mutex<Vec<KlagConsumer>>,
     pool_size: usize,
+    token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
 }
 
 impl TimestampConsumer {
-    pub fn with_pool_size(config: &ClusterConfig, pool_size: usize) -> Result<Self> {
+    pub fn with_pool_size(
+        config: &ClusterConfig,
+        pool_size: usize,
+        token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
+    ) -> Result<Self> {
         let mut consumer = Self {
             config: config.clone(),
             cluster_name: config.name.clone(),
@@ -37,6 +44,7 @@ impl TimestampConsumer {
             consumer_counter: AtomicU64::new(0),
             pool: Mutex::new(Vec::with_capacity(pool_size)),
             pool_size,
+            token_provider,
         };
 
         // Pre-populate the pool
@@ -55,7 +63,7 @@ impl TimestampConsumer {
     }
 
     /// Create a consumer for the pool.
-    fn create_consumer(&self) -> Result<BaseConsumer> {
+    fn create_consumer(&self) -> Result<KlagConsumer> {
         let counter = self.consumer_counter.fetch_add(1, Ordering::Relaxed);
 
         let mut client_config = ClientConfig::new();
@@ -79,15 +87,19 @@ impl TimestampConsumer {
             .set("queued.max.messages.kbytes", "1024")
             .set("topic.metadata.refresh.interval.ms", "-1");
 
+        apply_msk_iam_sasl(&self.config, &mut client_config);
+
         for (key, value) in &self.config.consumer_properties {
             client_config.set(key, value);
         }
 
-        client_config.create().map_err(KlagError::Kafka)
+        client_config
+            .create_with_context(KlagContext::new(self.token_provider.clone()))
+            .map_err(KlagError::Kafka)
     }
 
     /// Take a consumer from the pool, or create a new one if the pool is empty.
-    fn acquire(&self) -> Result<BaseConsumer> {
+    fn acquire(&self) -> Result<KlagConsumer> {
         let mut pool = self
             .pool
             .lock()
@@ -101,7 +113,7 @@ impl TimestampConsumer {
     }
 
     /// Return a consumer to the pool. If the pool is full, the consumer is dropped.
-    fn release(&self, consumer: BaseConsumer) {
+    fn release(&self, consumer: KlagConsumer) {
         // Unassign before returning to pool to clear any partition state
         let empty = rdkafka::TopicPartitionList::new();
         if let Err(e) = consumer.assign(&empty) {
@@ -132,7 +144,7 @@ impl TimestampConsumer {
 
         // RAII guard ensures consumer is returned to pool even on panic
         struct PoolGuard<'a> {
-            consumer: Option<BaseConsumer>,
+            consumer: Option<KlagConsumer>,
             pool: &'a TimestampConsumer,
         }
         impl<'a> Drop for PoolGuard<'a> {

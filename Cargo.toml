@@ -16,6 +16,8 @@ exclude = ["test-stack/", "docs/", ".github/", ".claude/"]
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl", "zstd", "libz", "external-lz4"] }
+aws-msk-iam-sasl-signer = { version = "1", optional = true }
+aws-types = { version = "1", optional = true }
 
 axum = "0.7"
 prometheus = "0.14"
@@ -47,8 +49,9 @@ k8s-openapi = { version = "0.24", features = ["v1_32"], optional = true }
 kube-lease-manager = { version = "0.8", optional = true }
 
 [features]
-default = ["jemalloc"]
+default = ["jemalloc", "msk-iam"]
 jemalloc = ["tikv-jemallocator"]
+msk-iam = ["dep:aws-msk-iam-sasl-signer", "dep:aws-types"]
 kubernetes = ["kube", "k8s-openapi", "kube-lease-manager"]
 
 [dev-dependencies]

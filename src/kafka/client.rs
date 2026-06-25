@@ -1,7 +1,7 @@
 use crate::config::{ClusterConfig, PerformanceConfig};
 use crate::error::{KlagError, Result};
+use crate::kafka::auth::{apply_msk_iam_sasl, build_token_provider, KlagContext};
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
-use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::groups::GroupList;
@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, info, instrument, warn};
+
+pub type KlagAdmin = AdminClient<KlagContext>;
+pub type KlagConsumer = BaseConsumer<KlagContext>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TopicPartition {
@@ -63,9 +66,10 @@ pub struct GroupDescription {
 }
 
 pub struct KafkaClient {
-    admin: Mutex<Arc<AdminClient<DefaultClientContext>>>,
-    consumer: Mutex<Arc<BaseConsumer>>,
+    admin: Mutex<Arc<KlagAdmin>>,
+    consumer: Mutex<Arc<KlagConsumer>>,
     config: ClusterConfig,
+    token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
     timeout: Duration,
     performance: PerformanceConfig,
 }
@@ -75,20 +79,26 @@ impl KafkaClient {
     /// Prefer `with_performance` for large clusters.
     #[allow(dead_code)]
     pub fn new(config: &ClusterConfig) -> Result<Self> {
-        Self::with_performance(config, PerformanceConfig::default())
+        Self::with_performance(config, PerformanceConfig::default(), None)
     }
 
     pub fn with_performance(
         config: &ClusterConfig,
         performance: PerformanceConfig,
+        token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
     ) -> Result<Self> {
         let timeout = performance.kafka_timeout;
-        let (admin, consumer) = Self::create_clients(config)?;
+        let token_provider = match token_provider {
+            Some(provider) => Some(provider),
+            None => build_token_provider(config)?,
+        };
+        let (admin, consumer) = Self::create_clients(config, token_provider.clone())?;
 
         Ok(Self {
             admin: Mutex::new(Arc::new(admin)),
             consumer: Mutex::new(Arc::new(consumer)),
             config: config.clone(),
+            token_provider,
             timeout,
             performance,
         })
@@ -97,19 +107,23 @@ impl KafkaClient {
     /// Create fresh AdminClient + BaseConsumer pair.
     fn create_clients(
         config: &ClusterConfig,
-    ) -> Result<(AdminClient<DefaultClientContext>, BaseConsumer)> {
+        token_provider: Option<Arc<dyn crate::kafka::auth::OAuthTokenProvider>>,
+    ) -> Result<(KlagAdmin, KlagConsumer)> {
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", &config.bootstrap_servers);
         client_config.set("client.id", format!("klag-exporter-{}", config.name));
+
+        apply_msk_iam_sasl(config, &mut client_config);
 
         for (key, value) in &config.consumer_properties {
             client_config.set(key, value);
         }
 
-        let admin: AdminClient<DefaultClientContext> =
-            client_config.create().map_err(KlagError::Kafka)?;
+        let admin: KlagAdmin = client_config
+            .create_with_context(KlagContext::new(token_provider.clone()))
+            .map_err(KlagError::Kafka)?;
 
-        let consumer: BaseConsumer = client_config
+        let consumer: KlagConsumer = client_config
             .clone()
             .set(
                 "group.id",
@@ -121,14 +135,14 @@ impl KafkaClient {
             .set("queued.max.messages.kbytes", "1024")
             // Reduce background metadata refresh — we call fetch_metadata() explicitly
             .set("topic.metadata.refresh.interval.ms", "600000")
-            .create()
+            .create_with_context(KlagContext::new(token_provider))
             .map_err(KlagError::Kafka)?;
 
         Ok((admin, consumer))
     }
 
     /// Get a snapshot of the current admin client (cheap Arc clone).
-    fn admin(&self) -> Arc<AdminClient<DefaultClientContext>> {
+    fn admin(&self) -> Arc<KlagAdmin> {
         Arc::clone(&self.admin.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
@@ -136,12 +150,12 @@ impl KafkaClient {
     /// Admin API wrappers in `kafka::admin` and by integration tests. The
     /// caller holds the Arc for the duration of the FFI call to keep the
     /// native handle valid.
-    pub fn admin_handle(&self) -> Arc<AdminClient<DefaultClientContext>> {
+    pub fn admin_handle(&self) -> Arc<KlagAdmin> {
         self.admin()
     }
 
     /// Get a snapshot of the current consumer (cheap Arc clone).
-    fn consumer(&self) -> Arc<BaseConsumer> {
+    fn consumer(&self) -> Arc<KlagConsumer> {
         Arc::clone(&self.consumer.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
@@ -152,7 +166,8 @@ impl KafkaClient {
     /// memory growth on clusters with many topics.
     pub fn recycle(&self) -> Result<()> {
         let rss_before = get_rss_kb();
-        let (new_admin, new_consumer) = Self::create_clients(&self.config)?;
+        let (new_admin, new_consumer) =
+            Self::create_clients(&self.config, self.token_provider.clone())?;
 
         *self.admin.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(new_admin);
         *self.consumer.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(new_consumer);

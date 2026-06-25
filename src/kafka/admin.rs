@@ -14,7 +14,7 @@ use crate::error::{KlagError, Result};
 use crate::kafka::client::TopicPartition;
 use rdkafka::admin::AdminClient;
 use rdkafka::bindings::*;
-use rdkafka::client::DefaultClientContext;
+use rdkafka::client::ClientContext;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -79,7 +79,7 @@ pub(crate) fn cstring_or_err(s: &str) -> Result<CString> {
 /// Keep the admin client alive for the duration of an FFI call. This type is
 /// intentionally opaque: callers pass `&AdminClient` and we hold references
 /// that must not outlive it.
-pub(crate) fn admin_native_ptr(admin: &AdminClient<DefaultClientContext>) -> *mut rd_kafka_t {
+pub(crate) fn admin_native_ptr<C: ClientContext>(admin: &AdminClient<C>) -> *mut rd_kafka_t {
     admin.inner().native_ptr()
 }
 
@@ -89,8 +89,8 @@ pub(crate) fn admin_native_ptr(admin: &AdminClient<DefaultClientContext>) -> *mu
 ///
 /// Partial failure policy: per-partition errors are logged at WARN and omitted
 /// from the returned map. Top-level event errors propagate as `KlagError::Admin`.
-pub fn list_offsets_batched(
-    admin: &AdminClient<DefaultClientContext>,
+pub fn list_offsets_batched<C: ClientContext>(
+    admin: &AdminClient<C>,
     partitions: &[TopicPartition],
     spec: OffsetSpec,
     timeout: Duration,
@@ -315,14 +315,17 @@ pub struct BatchedMember {
 /// iteration over the assignment's `rd_kafka_topic_partition_list_t` — the
 /// data is only consumed by per-partition metrics (granularity = "partition"),
 /// so it's pure wasted work at the default topic granularity.
-pub async fn describe_consumer_groups_batched(
-    admin: Arc<AdminClient<DefaultClientContext>>,
+pub async fn describe_consumer_groups_batched<C>(
+    admin: Arc<AdminClient<C>>,
     group_ids: &[&str],
     timeout: Duration,
     chunk_size: usize,
     parse_assignments: bool,
     max_concurrent_chunks: usize,
-) -> Result<Vec<BatchedGroupDescription>> {
+) -> Result<Vec<BatchedGroupDescription>>
+where
+    C: ClientContext + Send + Sync + 'static,
+{
     if group_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -423,8 +426,8 @@ pub async fn describe_consumer_groups_batched(
     Ok(out)
 }
 
-fn describe_consumer_groups_one_chunk(
-    admin: &AdminClient<DefaultClientContext>,
+fn describe_consumer_groups_one_chunk<C: ClientContext>(
+    admin: &AdminClient<C>,
     group_ids: &[&str],
     timeout: Duration,
     parse_assignments: bool,
@@ -625,8 +628,8 @@ unsafe fn ptr_to_string(p: *const c_char) -> String {
 /// (much smaller) response.
 ///
 /// Chunks groups into sub-calls of at most `chunk_size` groups each.
-pub fn list_consumer_group_offsets_batched(
-    admin: &AdminClient<DefaultClientContext>,
+pub fn list_consumer_group_offsets_batched<C: ClientContext>(
+    admin: &AdminClient<C>,
     group_ids: &[&str],
     timeout: Duration,
     chunk_size: usize,
@@ -643,8 +646,8 @@ pub fn list_consumer_group_offsets_batched(
     Ok(out)
 }
 
-fn list_consumer_group_offsets_one_chunk(
-    admin: &AdminClient<DefaultClientContext>,
+fn list_consumer_group_offsets_one_chunk<C: ClientContext>(
+    admin: &AdminClient<C>,
     group_ids: &[&str],
     timeout: Duration,
 ) -> Result<HashMap<String, HashMap<TopicPartition, i64>>> {

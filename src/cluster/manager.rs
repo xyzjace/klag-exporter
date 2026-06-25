@@ -3,6 +3,7 @@ use crate::collector::offset_collector::OffsetCollector;
 use crate::collector::timestamp_sampler::TimestampSampler;
 use crate::config::{ClusterConfig, ExporterConfig, Granularity};
 use crate::error::Result;
+use crate::kafka::auth::build_token_provider;
 use crate::kafka::client::KafkaClient;
 use crate::kafka::TimestampConsumer;
 use crate::leadership::LeadershipStatus;
@@ -43,7 +44,12 @@ impl ClusterManager {
         let filters = config.compile_filters()?;
         let performance = exporter_config.performance.clone();
 
-        let client = Arc::new(KafkaClient::with_performance(&config, performance.clone())?);
+        let token_provider = build_token_provider(&config)?;
+        let client = Arc::new(KafkaClient::with_performance(
+            &config,
+            performance.clone(),
+            token_provider.clone(),
+        )?);
         let offset_collector = OffsetCollector::with_performance(
             Arc::clone(&client),
             filters,
@@ -58,8 +64,11 @@ impl ClusterManager {
                     // Only build the pool when actually using it. This is
                     // the Tier-3 resident-memory saving for rate-mode users:
                     // no BaseConsumer pool, no extra librdkafka clients.
-                    let ts_consumer =
-                        TimestampConsumer::with_pool_size(&config, ts_cfg.max_concurrent_fetches)?;
+                    let ts_consumer = TimestampConsumer::with_pool_size(
+                        &config,
+                        ts_cfg.max_concurrent_fetches,
+                        token_provider,
+                    )?;
                     TimestampSampler::new_message(ts_consumer, ts_cfg.cache_ttl)
                 }
                 crate::config::TimestampSamplingMode::Rate => {
